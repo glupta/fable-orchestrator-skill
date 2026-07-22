@@ -1,6 +1,6 @@
 {
   "name": "fable-advisor-mcp-server",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "description": "MCP server exposing a Claude Fable 5 'advisor' tool for executor agents (Codex CLI)",
   "private": true,
   "type": "module",
@@ -10,7 +10,7 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
     "clean": "rm -rf dist",
-    "test": "node test/e2e-hang.mjs && node test/e2e-v3.mjs",
+    "test": "node test/e2e-hang.mjs && node test/e2e-v3.mjs && node test/e2e-grandchild-reap.mjs",
     "flush-stale": "bash scripts/flush-stale-servers.sh"
   },
   "engines": {

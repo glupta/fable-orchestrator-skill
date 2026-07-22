@@ -313,7 +313,11 @@ function runProcess(
   cwd?: string,
 ): Promise<ProcessResult> {
   return new Promise((resolve, reject) => {
-    const child = spawn(bin, args, { stdio: ["pipe", "pipe", "pipe"], cwd });
+    // detached: true makes the child its own process-group leader (pgid ===
+    // child.pid), so any grandchild it forks inherits that group and
+    // `kill(-pgid)` below reaches the whole tree instead of only the direct
+    // child.
+    const child = spawn(bin, args, { stdio: ["pipe", "pipe", "pipe"], cwd, detached: true });
     let stdout = "";
     let stderr = "";
     let timedOut = false;
@@ -335,7 +339,16 @@ function runProcess(
 
     const timer = setTimeout(() => {
       timedOut = true;
-      child.kill("SIGKILL");
+      // Kill the whole process group, not just the direct child. Signaling
+      // only the child stops the *promise* from hanging but leaves any
+      // grandchild running indefinitely, holding the stdio pipes open.
+      // Across a long-lived MCP server those accumulate and can exhaust
+      // memory/FDs, taking the parent worker down with them.
+      try {
+        process.kill(-child.pid!, "SIGKILL");
+      } catch {
+        child.kill("SIGKILL");
+      }
       // Don't wait for 'close' after the kill — if the pipes are held open
       // elsewhere it never comes. Give the streams a beat, then settle.
       setTimeout(() => settle(null), 2_000);
@@ -343,10 +356,14 @@ function runProcess(
 
     child.stdout.on("data", (chunk: Buffer) => (stdout += chunk.toString()));
     child.stderr.on("data", (chunk: Buffer) => (stderr += chunk.toString()));
-    // If the child dies before reading stdin, the write EPIPEs; an unhandled
-    // stream error would crash the whole server. Swallow it — the exit/close
-    // handlers still report the child's exit code.
+    // An unhandled 'error' on any of these streams (e.g. EPIPE from a killed
+    // child mid-read) throws and crashes this whole Node process — taking
+    // the MCP server, and the worker blocked reading its stdio transport,
+    // down with it. Swallow them all; the exit/close handlers below still
+    // report what happened.
     child.stdin.on("error", () => {});
+    child.stdout.on("error", () => {});
+    child.stderr.on("error", () => {});
     child.on("error", (error) => {
       if (settled) return;
       settled = true;
@@ -578,7 +595,20 @@ async function consultViaApi(
 
 // Bump on behavior changes: printed at startup so `ps` + codex logs can tell
 // a stale long-lived server process from one running current code.
-const SERVER_VERSION = "3.0.0";
+const SERVER_VERSION = "3.1.0";
+
+// Last-resort net: this server is a long-lived dependency of the Codex
+// worker's MCP transport (observed running for days across sessions). Any
+// exception that reaches here uncaught would otherwise kill the whole
+// process and sever that transport out from under the worker. Every known
+// throw site is already handled at its source (see runProcess and
+// runConsult above) — this only catches something new.
+process.on("uncaughtException", (error) => {
+  console.error("[fable-advisor] uncaughtException (server staying up):", error);
+});
+process.on("unhandledRejection", (reason) => {
+  console.error("[fable-advisor] unhandledRejection (server staying up):", reason);
+});
 
 const server = new McpServer({
   name: "fable-advisor-mcp-server",
